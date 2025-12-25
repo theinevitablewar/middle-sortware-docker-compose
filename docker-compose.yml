@@ -1,0 +1,175 @@
+services:
+  # --- MESSAGING ---
+  # --- 节点 0 ---
+  kafka:
+    image: 'apache/kafka:latest'
+    container_name: kafka
+    restart: always
+    environment:
+      - TZ=Asia/Shanghai
+      - KAFKA_NODE_ID=0
+      - KAFKA_PROCESS_ROLES=controller,broker
+      # 重要：这里也要加上 1@kafka-2:9093
+      - KAFKA_CONTROLLER_QUORUM_VOTERS=0@kafka:9093,1@kafka-2:9093 
+      - KAFKA_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:9094
+      - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092,EXTERNAL://localhost:9094
+      - KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      - KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER
+      - KAFKA_INTER_BROKER_LISTENER_NAME=PLAINTEXT
+      - KAFKA_CLUSTER_ID=4L669pY9S96ec3AnpBAu6g
+      - KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=2 # 建议统一设为 2
+      - KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS=0
+      - KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=2
+      - KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1
+    networks:
+      - app-network
+    ports:
+      - '9092:9092'
+      - '9094:9094'
+    volumes:
+      - ./data/kafka:/var/lib/kafka/data
+  
+  # --- 新增的 kafka-2 节点 (ID 为 1) ---
+  kafka-2:
+    image: 'apache/kafka:latest'
+    container_name: kafka-2
+    restart: always
+    environment:
+      - TZ=Asia/Shanghai
+      - KAFKA_NODE_ID=1
+      - KAFKA_PROCESS_ROLES=controller,broker
+      - KAFKA_CONTROLLER_QUORUM_VOTERS=0@kafka:9093,1@kafka-2:9093
+      - KAFKA_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:9095 # 注意端口冲突，这里用 9095
+      - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://kafka-2:9092,EXTERNAL://localhost:9095
+      - KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      - KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER
+      - KAFKA_INTER_BROKER_LISTENER_NAME=PLAINTEXT
+      - KAFKA_CLUSTER_ID=4L669pY9S96ec3AnpBAu6g # 必须与第一个节点相同
+      - KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=2 # 既然有 2 个节点了，可以设为 2
+    networks:
+      - app-network
+    ports:
+      - '9095:9095' # 宿主机访问端口
+    volumes:
+      - ./data/kafka-2:/var/lib/kafka/data
+      
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    restart: always
+    container_name: kafka-ui
+    environment:
+      - KAFKA_CLUSTERS_0_NAME=local-cluster
+      - KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS=kafka:9092
+    networks:
+      - app-network
+    ports:
+      - '8080:8080'
+    depends_on:
+      - kafka
+
+  # --- DATABASES ---
+  mysql:
+    image: mysql:9.1 # Specified version for stability
+    container_name: mysql-container
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: abc123
+      MYSQL_DATABASE: default_db
+      MYSQL_ROOT_HOST: '%'
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-pabc123"]
+      interval: 10s
+      retries: 5
+
+  redis:
+    image: redis:latest
+    container_name: redis-container
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - app-network
+    command: redis-server --appendonly yes --requirepass abc123
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "abc123", "ping"]
+      interval: 10s
+
+  # --- SEARCH & LOGGING (ELK) ---
+  elasticsearch:
+    image: elasticsearch:7.17.10 # Updated to match Logstash/Kibana better
+    container_name: elasticsearch-container
+    restart: always
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    ports:
+      - "9200:9200"
+    volumes:
+      - elasticsearch-data:/usr/share/elasticsearch/data
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
+      interval: 20s
+
+  logstash:
+    image: logstash:7.17.10
+    restart: always
+    container_name: logstash-container
+    volumes:
+      - ./logstash.conf:/usr/share/logstash/pipeline/logstash.conf:ro
+    networks:
+      - app-network
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+
+  kibana:
+    image: kibana:7.17.10
+    restart: always
+    container_name: kibana-container
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+    ports:
+      - "5601:5601"
+    networks:
+      - app-network
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+
+  # --- AI / LLM ---
+  ollama:
+    image: 'ollama/ollama:latest'
+    container_name: ollama
+    restart: always
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: bridge
+
+volumes:
+  mysql-data:
+  redis-data:
+  elasticsearch-data:
+  kibana-data:
+  ollama-data:
